@@ -106,9 +106,10 @@ fn setup_map(
         let downright = Vec3::new(wall[2] as f32, wall[3] as f32, 0.0);
         let center = (upleft + downright) / 2.0 * 0.002;
         let size_big = Vec3::new(
-            (wall[2] - wall[0] +10) as f32, 
-            (wall[3] - wall[1] +10) as f32, 1.0) * 0.002;
-        spawn_rect(&mut commands, &mut meshes, &mut materials, Color::BLACK, center, size_big); 
+            (wall[2] - wall[0] + 3) as f32, 
+            (wall[3] - wall[1] + 3) as f32, 1.0) * 0.002;
+        spawn_rect(&mut commands, &mut meshes, &mut materials, 
+            Color::BLACK, center, size_big); 
     }
     for wall in &map.walls {
         let upleft = Vec3::new(wall[0] as f32, wall[1] as f32, 0.0);
@@ -117,7 +118,14 @@ fn setup_map(
         let size = Vec3::new(
             (wall[2] - wall[0]) as f32, 
             (wall[3] - wall[1]) as f32, 1.0) * 0.002;
-        spawn_rect(&mut commands, &mut meshes, &mut materials, Color::WHITE, center, size); 
+        let color = match wall[4] {
+            1 => Color::rgba(0.7, 0.2, 0.0, 1.0),
+            2 => Color::rgba(0.15, 0.4, 0.03, 1.0),
+            3 => Color::rgba(0.4, 0.4, 0.4, 1.0),
+            _ => Color::rgba(1.0, 0.4, 0.03, 1.0),
+        };
+        spawn_rect(&mut commands, &mut meshes, &mut materials, 
+            color, center, size); 
     }
 }
 

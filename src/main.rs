@@ -8,7 +8,13 @@ use std::io::BufReader;
 
 use bevy_inspector_egui::Inspectable;
 
-use bevy::{prelude::*, sprite::MaterialMesh2dBundle, render::camera::ScalingMode};
+use bevy::{
+    prelude::*, 
+    sprite::{MaterialMesh2dBundle, collide_aabb::collide}, 
+    render::camera::ScalingMode,
+    ecs::system::EntityCommands,
+    math::Vec3Swizzles
+};
 
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 
@@ -44,24 +50,72 @@ fn camera_follow(
 #[derive(Component, Inspectable)]
 pub struct Player;
 
+#[derive(Component, Clone)]
+pub struct Collider {
+    speed_mul: f32,
+    height: bool,
+}
+
+fn wall_collision_check(
+    target_player_pos: Vec3,
+    wall_query: &Query<(&Transform, &Collider), 
+        (With<Collider>, Without<Player>)>,
+) -> Option<Collider> {
+    for (wall_transform, collider) in wall_query.iter() {
+        let collision = collide(
+            target_player_pos,
+            Vec2::splat(0.03),
+            wall_transform.translation,
+            wall_transform.scale.xy()
+        );
+        if collision.is_some() {
+            return Some(collider.clone());
+        }
+    }
+    None
+}
+
 fn movement (
     mut player_query: Query<(&Player, &mut Transform)>,
+    wall_query: Query<(&Transform, &Collider), 
+        (With<Collider>, Without<Player>)>,
     keyboard: Res<Input<KeyCode>>,
     time: Res<Time>,
 ) {
     let (_player, mut transform) = player_query.single_mut();
 
+    let mut dy = 0.0;
     if keyboard.pressed(KeyCode::W) {
-        transform.translation.y += 1.0 * time.delta_seconds();
+        dy += 1.0 * time.delta_seconds();
     }
     if keyboard.pressed(KeyCode::S) {
-        transform.translation.y -= 1.0 * time.delta_seconds();
+        dy -= 1.0 * time.delta_seconds();
     }
+
+    let mut dx = 0.0;
     if keyboard.pressed(KeyCode::A) {
-        transform.translation.x -= 1.0 * time.delta_seconds();
+        dx -= 1.0 * time.delta_seconds();
     }
     if keyboard.pressed(KeyCode::D) {
-        transform.translation.x += 1.0 * time.delta_seconds();
+        dx += 1.0 * time.delta_seconds();
+    }
+
+    let target = transform.translation + Vec3::new(dx, 0.0, 0.0);
+    if let Some(collider) = wall_collision_check(target, &wall_query) {
+        if !collider.height {
+            transform.translation += Vec3::new(dx, 0.0, 0.0) * collider.speed_mul;
+        }
+    } else {
+        transform.translation = target;
+    }
+    
+    let target = transform.translation + Vec3::new(0.0, dy, 0.0);
+    if let Some(collider) = wall_collision_check(target, &wall_query) {
+        if !collider.height {
+            transform.translation += Vec3::new(0.0, dy, 0.0) * collider.speed_mul;
+        }
+    } else {
+        transform.translation = target;
     }
 }
 
@@ -101,20 +155,38 @@ fn setup_map(
     let file = File::open("assets/maps/MAZE.txt").expect("No map file found");
     let map : Map = serde_json::from_reader(BufReader::new(file)).unwrap();
 
+    let minx = map.walls.iter().map(|w| w[0]).min().unwrap() as f32;
+    let maxx = map.walls.iter().map(|w| w[2]).max().unwrap() as f32;
+    let miny = map.walls.iter().map(|w| w[1]).min().unwrap() as f32;
+    let maxy = map.walls.iter().map(|w| w[3]).max().unwrap() as f32;
+    let origin = Vec3::new(
+        (maxx - minx), 
+        (maxy - miny),
+        0.0
+    );
+
     for wall in &map.walls {
         let upleft = Vec3::new(wall[0] as f32, wall[1] as f32, 0.0);
         let downright = Vec3::new(wall[2] as f32, wall[3] as f32, 0.0);
-        let center = (upleft + downright) / 2.0 * 0.002;
+        let center = (upleft + downright - origin) / 2.0 * 0.002;
         let size_big = Vec3::new(
             (wall[2] - wall[0] + 3) as f32, 
             (wall[3] - wall[1] + 3) as f32, 1.0) * 0.002;
-        spawn_rect(&mut commands, &mut meshes, &mut materials, 
-            Color::BLACK, center, size_big); 
+        commands.spawn_bundle(MaterialMesh2dBundle {
+            mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+            transform: Transform {
+                translation: center,
+                scale: size_big,
+                ..default()
+            },
+            material: materials.add(ColorMaterial::from(Color::BLACK)),
+            ..default()
+        });
     }
     for wall in &map.walls {
         let upleft = Vec3::new(wall[0] as f32, wall[1] as f32, 0.0);
         let downright = Vec3::new(wall[2] as f32, wall[3] as f32, 0.0);
-        let center = (upleft + downright) / 2.0 * 0.002;
+        let center = (upleft + downright - origin) / 2.0 * 0.002;
         let size = Vec3::new(
             (wall[2] - wall[0]) as f32, 
             (wall[3] - wall[1]) as f32, 1.0) * 0.002;
@@ -124,8 +196,20 @@ fn setup_map(
             3 => Color::rgba(0.4, 0.4, 0.4, 1.0),
             _ => Color::rgba(1.0, 0.4, 0.03, 1.0),
         };
-        spawn_rect(&mut commands, &mut meshes, &mut materials, 
-            color, center, size); 
+        commands.spawn_bundle(MaterialMesh2dBundle {
+            mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+            transform: Transform {
+                translation: center,
+                scale: size,
+                ..default()
+            },
+            material: materials.add(ColorMaterial::from(color)),
+            ..default()
+        })
+        .insert(Collider { 
+            speed_mul: if wall[4] == 2 { 0.5 } else { 1.0 },
+            height: if wall[4] == 2 { false } else { true }
+        });
     }
 }
 

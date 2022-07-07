@@ -55,12 +55,19 @@ fn camera_follow(
 #[derive(Component, Inspectable)]
 pub struct Player {
     speed: Vec3,
+    radius: f32
 }
 
 #[derive(Component, Clone)]
 pub struct Collider {
     speed_mul: f32,
     height: bool,
+}
+
+fn rotate (
+
+) {
+
 }
 
 fn wall_collision_check(
@@ -80,6 +87,62 @@ fn wall_collision_check(
         }
     }
     None
+}
+
+// https://stackoverflow.com/questions/3838329
+fn ccw (a: Vec3, b: Vec3, c: Vec3) -> bool {
+    (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x)
+}
+
+fn intersect_segment_segment (a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> bool {
+    ccw(a, c, d) != ccw(b, c, d) && ccw(a, b, c) != ccw(a, b, d)
+}
+
+fn collision_segment_segment (
+    pos: Vec3, vel: Vec3, 
+    lo: Vec3, hi: Vec3, norm: Vec3
+) -> (Vec3, Vec3) {
+    if intersect_segment_segment(pos, pos + vel, lo, hi) {
+        let target = pos + vel - lo;
+        let tan = (hi - lo).normalize();
+        let tv = target.dot(tan) * tan;
+        return (lo + tv + norm * 0.0001, Vec3::ZERO)
+    }
+    (pos, vel)
+}
+
+// https://stackoverflow.com/questions/1073336
+fn intersect_segment_circle (e: Vec3, l: Vec3, c: Vec3, r: f32) -> bool {
+    if (e + l - c).length_squared() < r * r { return true }
+    if (e - c).length_squared() < r * r { return true }
+    
+    let d = l;
+    let f = e - c;
+    let a = d.length_squared();
+    let b = 2.0 * f.dot(d);
+    let z = f.dot(f) - r * r;
+    let delta = b * b - 4.0 * a * z;
+    if delta > 0.0 {
+        let deltaroot = delta.sqrt();
+        let t1 = (-b - deltaroot) / (2.0 * a);
+        if t1 >= 0.0 && t1 <= 1.0 { return true }
+        let t2 = (-b + deltaroot) / (2.0 * a);
+        if t2 >= 0.0 && t2 <= 1.0 { return true }
+    } 
+    false
+}
+
+fn collision_segment_circle (
+    pos: Vec3, vel: Vec3, 
+    center: Vec3, rad: f32
+) -> (Vec3, Vec3) {
+    if intersect_segment_circle(pos, vel, center, rad) { 
+        let out = pos + vel - center;
+        let norm = out.normalize();
+        let perp = Vec3::new(-out.y, out.x, 0.0).dot(out) * 2.0;
+        return (norm * rad * 1.0005 + center, out * perp)
+    }
+    (pos, vel)
 }
 
 fn movement (
@@ -110,6 +173,44 @@ fn movement (
     player.speed += acc * 0.1;
     player.speed *= 0.8;
 
+    for (wall_transform, collider) in wall_query.iter() {
+        let center = wall_transform.translation;
+        let size = wall_transform.scale;
+        let (pos, vel) = collision_segment_segment(
+            transform.translation, player.speed,
+            center + Vec3::new(size.x/2.0 + player.radius, size.y/2.0, 0.0),
+            center + Vec3::new(size.x/2.0 + player.radius, -size.y/2.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0)
+        );
+        let (pos, vel) = collision_segment_segment(
+            pos, vel,
+            center + Vec3::new(-size.x/2.0 - player.radius, size.y/2.0, 0.0),
+            center + Vec3::new(-size.x/2.0 - player.radius, -size.y/2.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0)
+        );
+        let (pos, vel) = collision_segment_segment(
+            pos, vel,
+            center + Vec3::new(size.x/2.0, size.y/2.0 + player.radius, 0.0),
+            center + Vec3::new(-size.x/2.0, size.y/2.0 + player.radius, 0.0),
+            Vec3::new(0.0, 1.0, 0.0)
+        );
+        let (pos, vel) = collision_segment_segment(
+            pos, vel,
+            center + Vec3::new(size.x/2.0, -size.y/2.0 - player.radius, 0.0),
+            center + Vec3::new(-size.x/2.0, -size.y/2.0 - player.radius, 0.0),
+            Vec3::new(0.0, -1.0, 0.0)
+        );
+        let (pos, vel) = collision_segment_circle(
+            pos, vel,
+            center + Vec3::new(size.x/2.0, size.y/2.0, 0.0),
+            player.radius
+        );
+        transform.translation = pos;
+        player.speed = vel;
+    }
+
+    transform.translation += player.speed;
+    /*
     let target = transform.translation + player.speed;
     if let Some(collider) = wall_collision_check(target, &wall_query) {
         if !collider.height {
@@ -118,26 +219,6 @@ fn movement (
             player.speed *= 0.8;
         } else {
             player.speed *= 0.0;
-        }
-    } else {
-        transform.translation = target;
-    }
-    /*
-    let target = transform.translation + Vec3::new(acc.x, 0.0, 0.0);
-    if let Some(collider) = wall_collision_check(target, &wall_query) {
-        if !collider.height {
-            transform.translation += Vec3::new(acc.x, 0.0, 0.0) 
-                * collider.speed_mul;
-        }
-    } else {
-        transform.translation = target;
-    }
-    
-    let target = transform.translation + Vec3::new(0.0, acc.y, 0.0);
-    if let Some(collider) = wall_collision_check(target, &wall_query) {
-        if !collider.height {
-            transform.translation += Vec3::new(0.0, acc.y, 0.0) 
-                * collider.speed_mul;
         }
     } else {
         transform.translation = target;
@@ -177,7 +258,7 @@ fn setup_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let file = File::open("assets/maps/MAZE.txt").expect("No map file found");
+    let file = File::open("assets/maps/TERM.txt").expect("No map file found");
     let map : Map = serde_json::from_reader(BufReader::new(file)).unwrap();
 
     let minx = map.walls.iter().map(|w| w[0]).min().unwrap() as f32;
@@ -185,8 +266,8 @@ fn setup_map(
     let miny = map.walls.iter().map(|w| w[1]).min().unwrap() as f32;
     let maxy = map.walls.iter().map(|w| w[3]).max().unwrap() as f32;
     let origin = Vec3::new(
-        (maxx - minx), 
-        (maxy - miny),
+        maxx - minx, 
+        maxy - miny,
         0.0
     );
 
@@ -261,7 +342,10 @@ fn setup(
         ..default()
     })
         .push_children(&[color])
-        .insert(Player { speed: Vec3::new(0.0, 0.0, 0.0) });
+        .insert(Player { 
+            speed: Vec3::new(0.0, 0.0, 0.0),
+            radius: 0.015
+        });
 
     setup_map(commands, meshes, materials);
 }

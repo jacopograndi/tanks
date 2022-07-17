@@ -1,24 +1,17 @@
 mod debug;
-use debug::DebugPlugin;
 
 use serde::Deserialize;
 
 use std::fs::File;
 use std::io::BufReader;
 
-use bevy_inspector_egui::Inspectable;
-
-use bevy::{
-    core::FixedTimestep,
-    prelude::*,
-    render::camera::ScalingMode,
-    sprite::MaterialMesh2dBundle,
-    window::{Window, WindowResized},
-};
-
-use bevy_rapier2d::prelude::*;
-
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
+use bevy::ecs::archetype::Archetypes;
+use bevy::ecs::component::ComponentId;
+use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
+
+use bevy_inspector_egui::Inspectable;
+use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
 
 fn main() {
     App::new()
@@ -34,8 +27,10 @@ fn main() {
         .add_plugin(FrameTimeDiagnosticsPlugin::default())
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
         .add_plugin(RapierDebugRenderPlugin::default())
-        .add_system_to_stage(PhysicsStages::Writeback, camera_follow)
-        .add_system(movement)
+        .add_system_to_stage(CoreStage::Update, movement)
+        .add_system_to_stage(CoreStage::Update, shoot)
+        .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
+        .add_system_to_stage(CoreStage::PostUpdate, hits)
         .add_system(window_resized_event)
         .run();
 }
@@ -68,6 +63,33 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn_bundle(camera);
 }
 
+fn hits(
+    mut commands: Commands,
+    mut collision_events: EventReader<CollisionEvent>,
+    bullet_query: Query<&Bullet>,
+) {
+    let mut despawned = Vec::<Entity>::new();
+    for collision_event in collision_events.iter() {
+        if let Started(ent, oth, _) = collision_event {
+            if let Ok(_) = bullet_query.get(*ent) {
+                if !despawned.contains(&*ent) {
+                    despawned.push(*ent);
+                    commands.entity(*ent).despawn();
+                }
+            }
+            if let Ok(_) = bullet_query.get(*oth) {
+                if !despawned.contains(&*oth) {
+                    despawned.push(*oth);
+                    commands.entity(*oth).despawn();
+                }
+            }
+        }
+    }
+}
+
+#[derive(Component, Inspectable)]
+pub struct Bullet;
+
 #[derive(Component, Inspectable)]
 pub struct Player {
     speed: f32,
@@ -92,7 +114,60 @@ fn movement(mut player_query: Query<(&mut Player, &mut Velocity)>, keyboard: Res
         if acc.length_squared() > 0.0 {
             acc /= acc.length();
         }
-        rb_vels.linvel = acc * player.speed;
+        rb_vels.linvel += acc * player.speed;
+    }
+}
+
+fn shoot(
+    player_query: Query<(&Player, &Transform, &Velocity)>,
+    keyboard: Res<Input<KeyCode>>,
+    mut commands: Commands,
+) {
+    for (player, player_transform, _rb_vels) in player_query.iter() {
+        let mut acc = Vec2::new(0.0, 0.0);
+        if keyboard.pressed(KeyCode::Up) {
+            acc.y += 1.0;
+        }
+        if keyboard.pressed(KeyCode::Down) {
+            acc.y -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::Left) {
+            acc.x -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::Right) {
+            acc.x += 1.0;
+        }
+        if acc.length_squared() > 0.0 {
+            acc /= acc.length();
+            let head = Vec3::new(acc.x, acc.y, 0.0) * (2.0 + player.radius + 3.0);
+            commands
+                .spawn()
+                .insert_bundle(SpriteBundle {
+                    transform: Transform {
+                        translation: player_transform.translation + head,
+                        scale: Vec3::splat(4.0),
+                        ..default()
+                    },
+                    sprite: Sprite {
+                        color: Color::BLACK,
+                        ..default()
+                    },
+                    ..default()
+                })
+                .insert(Bullet)
+                .insert(RigidBody::Dynamic)
+                .insert(Restitution::coefficient(0.0))
+                .insert(Collider::ball(1.0))
+                .insert(LockedAxes::ROTATION_LOCKED)
+                .insert(Damping {
+                    linear_damping: 0.3,
+                    angular_damping: 1.0,
+                })
+                .insert(Ccd::enabled())
+                .insert(Velocity::linear(acc * 1000.0))
+                .insert(CollisionGroups::new(0b010, 0b101))
+                .insert(ActiveEvents::COLLISION_EVENTS);
+        }
     }
 }
 
@@ -104,12 +179,8 @@ struct Map {
     lives: Vec<Vec<i32>>,
 }
 
-fn setup_map(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    let file = File::open("assets/maps/OFFC.txt").expect("No map file found");
+fn setup_map(mut commands: Commands) {
+    let file = File::open("assets/maps/TERM.txt").expect("No map file found");
     let map: Map = serde_json::from_reader(BufReader::new(file)).unwrap();
 
     let minx = map.walls.iter().map(|w| w[0]).min().unwrap() as f32;
@@ -128,14 +199,17 @@ fn setup_map(
             1.0,
         );
         let movecenter = center - Vec3::new(0.0, 0.0, if wall[4] == 2 { 1.0 } else { 0.0 });
-        commands.spawn_bundle(MaterialMesh2dBundle {
-            mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+
+        commands.spawn_bundle(SpriteBundle {
             transform: Transform {
                 translation: movecenter,
                 scale: size_big,
                 ..default()
             },
-            material: materials.add(ColorMaterial::from(Color::BLACK)),
+            sprite: Sprite {
+                color: Color::BLACK,
+                ..default()
+            },
             ..default()
         });
     }
@@ -152,47 +226,52 @@ fn setup_map(
         };
         let movecenter = center - Vec3::new(0.0, 0.0, if wall[4] == 2 { 1.0 } else { 0.0 });
         commands
-            .spawn_bundle(MaterialMesh2dBundle {
-                mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+            .spawn_bundle(SpriteBundle {
                 transform: Transform {
                     translation: movecenter,
                     scale: size,
                     ..default()
                 },
-                material: materials.add(ColorMaterial::from(color)),
+                sprite: Sprite { color, ..default() },
                 ..default()
             })
-            .insert(Collider::cuboid(0.5, 0.5));
+            .insert(Collider::cuboid(0.5, 0.5))
+            .insert(CollisionGroups::new(0b100, 0b111));
     }
 }
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut rapier_config: ResMut<RapierConfiguration>,
-) {
+fn setup(mut commands: Commands, mut rapier_config: ResMut<RapierConfiguration>) {
     rapier_config.gravity = Vec2::ZERO;
 
     let color = commands
-        .spawn_bundle(MaterialMesh2dBundle {
-            mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+        .spawn()
+        .insert_bundle(SpriteBundle {
             transform: Transform::default().with_scale(Vec3::splat(1.2)),
-            material: materials.add(ColorMaterial::from(Color::BLACK)),
+            sprite: Sprite {
+                color: Color::BLACK,
+                ..default()
+            },
             ..default()
         })
         .id();
 
     commands
-        .spawn_bundle(MaterialMesh2dBundle {
-            mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
-            transform: Transform::default().with_scale(Vec3::splat(13.0)),
-            material: materials.add(ColorMaterial::from(Color::WHITE)),
+        .spawn()
+        .insert_bundle(SpriteBundle {
+            transform: Transform {
+                translation: Vec3::new(0.0, 0.0, 0.0),
+                scale: Vec3::splat(10.0),
+                ..default()
+            },
+            sprite: Sprite {
+                color: Color::WHITE,
+                ..default()
+            },
             ..default()
         })
         .push_children(&[color])
         .insert(Player {
-            speed: 300.0,
+            speed: 150.0,
             radius: 10.0,
         })
         .insert(RigidBody::Dynamic)
@@ -200,10 +279,16 @@ fn setup(
         .insert(Collider::ball(1.0))
         .insert(LockedAxes::ROTATION_LOCKED)
         .insert(Damping {
-            linear_damping: 0.8,
+            linear_damping: 30.0,
             angular_damping: 1.0,
         })
-        .insert(Velocity::zero());
+        .insert(Friction {
+            coefficient: 0.0,
+            combine_rule: CoefficientCombineRule::Min,
+        })
+        .insert(Ccd::enabled())
+        .insert(Velocity::zero())
+        .insert(CollisionGroups::new(0b001, 0b111));
 
-    setup_map(commands, meshes, materials);
+    setup_map(commands);
 }

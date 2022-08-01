@@ -135,16 +135,17 @@ fn shoot(
         if acc.length_squared() > 0.0 {
             acc /= acc.length();
             let head = Vec3::new(acc.x, acc.y, 0.0) * (2.0 + player.radius + 3.0);
+            let angle = Vec2::angle_between(Vec2::new(1.0, 0.0), acc);
             commands
                 .spawn()
                 .insert_bundle(SpriteBundle {
                     transform: Transform {
                         translation: player_transform.translation + head,
-                        scale: Vec3::splat(4.0),
-                        ..default()
+                        rotation: Quat::from_euler(EulerRot::XYZ, 0.0, 0.0, angle),
+                        scale: Vec3::new(5.0, 2.0, 1.0),
                     },
                     sprite: Sprite {
-                        color: Color::BLACK,
+                        color: Color::WHITE,
                         ..default()
                     },
                     ..default()
@@ -152,7 +153,7 @@ fn shoot(
                 .insert(Bullet)
                 .insert(RigidBody::Dynamic)
                 .insert(Restitution::coefficient(0.0))
-                .insert(Collider::ball(1.0))
+                .insert(Collider::cuboid(0.5, 0.5))
                 .insert(LockedAxes::ROTATION_LOCKED)
                 .insert(Damping {
                     linear_damping: 0.3,
@@ -220,7 +221,7 @@ fn setup_map(mut commands: Commands) {
             _ => Color::rgba(1.0, 0.4, 0.03, 1.0),
         };
         let movecenter = center - Vec3::new(0.0, 0.0, if wall[4] == 2 { 1.0 } else { 0.0 });
-        commands
+        let entity = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
                     translation: movecenter,
@@ -231,7 +232,16 @@ fn setup_map(mut commands: Commands) {
                 ..default()
             })
             .insert(Collider::cuboid(0.5, 0.5))
-            .insert(CollisionGroups::new(0b100, 0b111));
+            .id();
+        if wall[4] == 1 {
+            commands
+                .entity(entity)
+                .insert(CollisionGroups::new(0b100, 0b111));
+        } else {
+            commands
+                .entity(entity)
+                .insert(CollisionGroups::new(0b100, 0b101));
+        }
     }
 }
 

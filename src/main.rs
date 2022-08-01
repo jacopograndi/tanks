@@ -1,16 +1,11 @@
-mod debug;
-
 use serde::Deserialize;
 
 use std::fs::File;
 use std::io::BufReader;
 
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
-use bevy::ecs::archetype::Archetypes;
-use bevy::ecs::component::ComponentId;
 use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
-use bevy_inspector_egui::Inspectable;
 use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
 
 fn main() {
@@ -56,9 +51,9 @@ fn camera_follow(
 }
 
 fn spawn_camera(mut commands: Commands) {
-    let mut camera = OrthographicCameraBundle::new_2d();
-    camera.orthographic_projection.scaling_mode = ScalingMode::WindowSize;
-    camera.orthographic_projection.scale = 1.0;
+    let mut camera = Camera2dBundle::default();
+    camera.projection.scaling_mode = ScalingMode::WindowSize;
+    camera.projection.scale = 1.0;
     camera.transform = Transform::from_xyz(0.0, 0.0, 100.0);
     commands.spawn_bundle(camera);
 }
@@ -87,10 +82,10 @@ fn hits(
     }
 }
 
-#[derive(Component, Inspectable)]
+#[derive(Component)]
 pub struct Bullet;
 
-#[derive(Component, Inspectable)]
+#[derive(Component)]
 pub struct Player {
     speed: f32,
     radius: f32,

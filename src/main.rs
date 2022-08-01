@@ -8,6 +8,16 @@ use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
 use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
 
+/// i can step the rapier simulation by adding to the rollback systems
+/// the rapier system set. bevy_rapier provides 4 system sets.
+/// bevy_ggrs can take a schedule and a type, so no RapierContext
+/// in the schedule i can
+///   deserialize RapierContext
+///   run the game logic
+///   run the rapier systems
+///   serialize RapierContext
+/// the only problem is the first RapierContext, but default should be fine
+
 fn main() {
     App::new()
         .insert_resource(WindowDescriptor {
@@ -53,7 +63,6 @@ fn camera_follow(
 fn spawn_camera(mut commands: Commands) {
     let mut camera = Camera2dBundle::default();
     camera.projection.scaling_mode = ScalingMode::WindowSize;
-    camera.projection.scale = 1.0;
     camera.transform = Transform::from_xyz(0.0, 0.0, 100.0);
     commands.spawn_bundle(camera);
 }

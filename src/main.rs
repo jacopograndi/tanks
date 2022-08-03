@@ -8,36 +8,150 @@ use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
 use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
 
-/// i can step the rapier simulation by adding to the rollback systems
-/// the rapier system set. bevy_rapier provides 4 system sets.
-/// bevy_ggrs can take a schedule and a type, so no RapierContext
-/// in the schedule i can
-///   deserialize RapierContext
-///   run the game logic
-///   run the rapier systems
-///   serialize RapierContext
-/// the only problem is the first RapierContext, but default should be fine
+use bevy_ggrs::{GGRSPlugin, SessionType};
+use ggrs::{Config, PlayerHandle, PlayerType, SessionBuilder, UdpNonBlockingSocket};
 
-fn main() {
-    App::new()
-        .insert_resource(WindowDescriptor {
-            title: "Tanks!".to_string(),
-            resizable: true,
-            ..Default::default()
-        })
-        .add_plugins(DefaultPlugins)
-        .add_startup_system(spawn_camera)
-        .add_startup_system(setup)
-        .add_plugin(LogDiagnosticsPlugin::default())
-        .add_plugin(FrameTimeDiagnosticsPlugin::default())
-        .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
-        .add_plugin(RapierDebugRenderPlugin::default())
-        .add_system_to_stage(CoreStage::Update, movement)
-        .add_system_to_stage(CoreStage::Update, shoot)
-        .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
-        .add_system_to_stage(CoreStage::PostUpdate, hits)
-        .add_system(window_resized_event)
-        .run();
+use bytemuck::{Pod, Zeroable};
+use std::net::SocketAddr;
+
+use structopt::StructOpt;
+
+#[derive(Debug)]
+pub struct GGRSConfig;
+impl Config for GGRSConfig {
+    type Input = BoxInput;
+    type State = u8;
+    type Address = SocketAddr;
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
+pub struct BoxInput {
+    pub inp: u8,
+}
+
+const FPS: usize = 60;
+const ROLLBACK_DEFAULT: &str = "rollback_default";
+
+const INPUT_UP: u8 = 1 << 0;
+const INPUT_DOWN: u8 = 1 << 1;
+const INPUT_LEFT: u8 = 1 << 2;
+const INPUT_RIGHT: u8 = 1 << 3;
+
+pub fn input(_handle: In<PlayerHandle>, keyboard_input: Res<Input<KeyCode>>) -> BoxInput {
+    let mut input: u8 = 0;
+
+    if keyboard_input.pressed(KeyCode::W) {
+        input |= INPUT_UP;
+    }
+    if keyboard_input.pressed(KeyCode::A) {
+        input |= INPUT_LEFT;
+    }
+    if keyboard_input.pressed(KeyCode::S) {
+        input |= INPUT_DOWN;
+    }
+    if keyboard_input.pressed(KeyCode::D) {
+        input |= INPUT_RIGHT;
+    }
+
+    BoxInput { inp: input }
+}
+
+// structopt will read command line parameters for u
+#[derive(StructOpt)]
+struct Opt {
+    #[structopt(short, long)]
+    local_port: u16,
+    #[structopt(short, long)]
+    players: Vec<String>,
+    #[structopt(short, long)]
+    spectators: Vec<SocketAddr>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // read cmd line arguments
+    let opt = Opt::from_args();
+    let num_players = opt.players.len();
+    assert!(num_players > 0);
+
+    // create a GGRS session
+    let mut sess_build = SessionBuilder::<GGRSConfig>::new()
+        .with_num_players(num_players)
+        .with_max_prediction_window(12) // (optional) set max prediction window
+        .with_input_delay(2); // (optional) set input delay for the local player
+
+    // add players
+    for (i, player_addr) in opt.players.iter().enumerate() {
+        // local player
+        if player_addr == "localhost" {
+            sess_build = sess_build.add_player(PlayerType::Local, i)?;
+        } else {
+            // remote players
+            let remote_addr: SocketAddr = player_addr.parse()?;
+            sess_build = sess_build.add_player(PlayerType::Remote(remote_addr), i)?;
+        }
+    }
+
+    // optionally, add spectators
+    for (i, spec_addr) in opt.spectators.iter().enumerate() {
+        sess_build = sess_build.add_player(PlayerType::Spectator(*spec_addr), num_players + i)?;
+    }
+
+    // start the GGRS session
+    let socket = UdpNonBlockingSocket::bind_to_port(opt.local_port)?;
+    let sess = sess_build.start_p2p_session(socket)?;
+
+    let mut app = App::new();
+    GGRSPlugin::<GGRSConfig>::new()
+        .with_update_frequency(FPS)
+        .with_input_system(input)
+        .register_rollback_type::<Transform>()
+        .register_rollback_type::<Velocity>()
+        .with_rollback_schedule(
+            Schedule::default().with_stage(
+                ROLLBACK_DEFAULT,
+                SystemStage::parallel()
+                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
+                        PhysicsStages::SyncBackend,
+                    ))
+                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
+                        PhysicsStages::StepSimulation,
+                    ))
+                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
+                        PhysicsStages::Writeback,
+                    ))
+                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
+                        PhysicsStages::DetectDespawn,
+                    )),
+            ),
+        )
+        .build(&mut app);
+
+    app.insert_resource(WindowDescriptor {
+        title: "Tanks!".to_string(),
+        resizable: true,
+        ..Default::default()
+    })
+    // add your GGRS session
+    .insert_resource(sess)
+    .insert_resource(SessionType::P2PSession)
+    .add_plugins(DefaultPlugins)
+    .add_startup_system(spawn_camera)
+    .add_startup_system(setup)
+    .add_plugin(LogDiagnosticsPlugin::default())
+    .add_plugin(FrameTimeDiagnosticsPlugin::default())
+    .add_plugin(
+        RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0).with_default_system_setup(false),
+    )
+    .add_plugin(RapierDebugRenderPlugin::default())
+    .add_system_to_stage(CoreStage::Update, movement)
+    .add_system_to_stage(CoreStage::Update, shoot)
+    .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
+    .add_system_to_stage(CoreStage::PostUpdate, hits)
+    .add_system(window_resized_event)
+    .run();
+
+    Ok(())
 }
 
 fn window_resized_event(

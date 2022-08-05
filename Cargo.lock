@@ -137,6 +137,9 @@ name = "arrayvec"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8da52d66c7071e2e3fa2a1e5c6d088fec47b593032b254f5e980de8ea54454d6"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ash"
@@ -609,6 +612,7 @@ dependencies = [
  "log",
  "nalgebra",
  "rapier2d",
+ "serde",
 ]
 
 [[package]]
@@ -929,6 +933,9 @@ name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitfield-rle"
@@ -1916,6 +1923,7 @@ checksum = "e6012d540c5baa3589337a98ce73408de9b5a25ec9fc2c6fd6be8f0d39e0ca5a"
 dependencies = [
  "autocfg",
  "hashbrown 0.11.2",
+ "serde",
 ]
 
 [[package]]
@@ -1969,6 +1977,7 @@ dependencies = [
  "bevy",
  "bevy_ggrs",
  "bevy_rapier2d",
+ "bincode",
  "bytemuck",
  "ggrs",
  "serde",
@@ -2262,6 +2271,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -2427,6 +2437,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ae39348c8bc5fbd7f40c727a9925f03517afd2ab27d46702108b6a7e5414c19"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2648,10 +2659,12 @@ dependencies = [
  "bitflags",
  "downcast-rs",
  "either",
+ "indexmap",
  "nalgebra",
  "num-derive",
  "num-traits",
  "rustc-hash",
+ "serde",
  "simba",
  "slab",
  "smallvec",
@@ -2837,11 +2850,13 @@ dependencies = [
  "bitflags",
  "crossbeam",
  "downcast-rs",
+ "indexmap",
  "nalgebra",
  "num-derive",
  "num-traits",
  "parry2d",
  "rustc-hash",
+ "serde",
  "simba",
 ]
 
@@ -3046,6 +3061,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a2609e876d4f77f6ab7ff5254fc39b4f1927ba8e6db3d18be7c32534d3725e"
 dependencies = [
  "approx",
+ "libm",
  "num-complex",
  "num-traits",
  "paste",

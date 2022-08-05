@@ -1,4 +1,4 @@
 #! /usr/bin/bash
 
-cargo run -- --local-port=40000 --players localhost 127.0.0.1:40001 &
-cargo run -- --local-port=40001 --players localhost 127.0.0.1:40001 &
+alacritty --hold -e cargo run -- --local-port=40000 --players localhost 127.0.0.1:40001 & (sleep 1 && 
+alacritty --hold -e cargo run -- --local-port=40001 --players 127.0.0.1:40000 localhost) &

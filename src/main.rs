@@ -1,9 +1,6 @@
-use serde::Deserialize;
-
 use std::fs::File;
 use std::io::BufReader;
 
-use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
 use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
@@ -17,7 +14,6 @@ use ggrs::{
 use bytemuck::{Pod, Zeroable};
 use std::net::SocketAddr;
 
-use bincode::{deserialize, serialize};
 use structopt::StructOpt;
 
 #[derive(Debug)]
@@ -28,8 +24,14 @@ impl Config for GGRSConfig {
     type Address = SocketAddr;
 }
 
-const FPS: usize = 10;
-const ROLLBACK_DEFAULT: &str = "rollback_default";
+const FPS: usize = 60;
+const ROLLBACK_SETUP: &str = "rollback_setup";
+const ROLLBACK_PHYSICS_0: &str = "rollback_physics_0";
+const ROLLBACK_PHYSICS_1: &str = "rollback_physics_1";
+const ROLLBACK_PHYSICS_2: &str = "rollback_physics_2";
+const ROLLBACK_PHYSICS_3: &str = "rollback_physics_3";
+const ROLLBACK_CORE: &str = "rollback_core";
+const ROLLBACK_TEARDOWN: &str = "rollback_teardown";
 
 // structopt will read command line parameters for u
 #[derive(StructOpt)]
@@ -83,27 +85,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_rollback_type::<Player>()
         .register_rollback_type::<Bullet>()
         .with_rollback_schedule(
-            Schedule::default().with_stage(
-                ROLLBACK_DEFAULT,
-                SystemStage::single_threaded()
-                    .with_system(physics_deser)
-                    .with_system(movement)
-                    .with_system(shoot)
-                    .with_system(hits)
-                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
-                        PhysicsStages::SyncBackend,
-                    ))
-                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
-                        PhysicsStages::StepSimulation,
-                    ))
-                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
-                        PhysicsStages::Writeback,
-                    ))
-                    .with_system_set(RapierPhysicsPlugin::<()>::get_systems(
-                        PhysicsStages::DetectDespawn,
-                    ))
-                    .with_system(physics_ser),
-            ),
+            Schedule::default()
+                .with_stage(ROLLBACK_SETUP, SystemStage::single(physics_deser))
+                .with_stage_after(
+                    ROLLBACK_SETUP,
+                    ROLLBACK_CORE,
+                    SystemStage::parallel()
+                        .with_system(movement)
+                        .with_system(shoot)
+                        .with_system(hits),
+                )
+                .with_stage_after(
+                    ROLLBACK_CORE,
+                    ROLLBACK_PHYSICS_0,
+                    SystemStage::parallel().with_system_set(
+                        RapierPhysicsPlugin::<NoUserData>::get_systems(PhysicsStages::SyncBackend),
+                    ),
+                )
+                .with_stage_after(
+                    ROLLBACK_PHYSICS_0,
+                    ROLLBACK_PHYSICS_1,
+                    SystemStage::parallel().with_system_set(
+                        RapierPhysicsPlugin::<NoUserData>::get_systems(
+                            PhysicsStages::StepSimulation,
+                        ),
+                    ),
+                )
+                .with_stage_after(
+                    ROLLBACK_PHYSICS_1,
+                    ROLLBACK_PHYSICS_2,
+                    SystemStage::parallel().with_system_set(
+                        RapierPhysicsPlugin::<NoUserData>::get_systems(PhysicsStages::Writeback),
+                    ),
+                )
+                .with_stage_after(
+                    ROLLBACK_PHYSICS_2,
+                    ROLLBACK_PHYSICS_3,
+                    SystemStage::parallel().with_system_set(
+                        RapierPhysicsPlugin::<NoUserData>::get_systems(
+                            PhysicsStages::DetectDespawn,
+                        ),
+                    ),
+                )
+                .with_stage_after(
+                    ROLLBACK_PHYSICS_3,
+                    ROLLBACK_TEARDOWN,
+                    SystemStage::single(physics_ser),
+                ),
         )
         .build(&mut app);
 
@@ -112,18 +140,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resizable: true,
         ..Default::default()
     })
-    // add your GGRS session
-    .insert_resource(sess)
-    .insert_resource(SessionType::P2PSession)
     .add_plugins(DefaultPlugins)
-    .add_startup_system(physics_init)
-    .add_startup_system(setup)
-    .add_startup_system(spawn_camera)
-    //.add_plugin(LogDiagnosticsPlugin::default())
-    //.add_plugin(FrameTimeDiagnosticsPlugin::default())
+    .insert_resource(RapierConfiguration {
+        gravity: Vec2::new(0.0, 0.0),
+        physics_pipeline_active: true,
+        query_pipeline_active: true,
+        scaled_shape_subdivision: 1,
+        timestep_mode: TimestepMode::Fixed {
+            dt: 1.0 / (FPS as f32),
+            substeps: 2,
+        },
+    })
     .add_plugin(
         RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0).with_default_system_setup(false),
     )
+    .add_startup_system(physics_init)
+    .add_startup_system(setup)
+    .add_startup_system(spawn_camera)
+    // add your GGRS session
+    .insert_resource(sess)
+    .insert_resource(SessionType::P2PSession)
+    //.add_plugin(LogDiagnosticsPlugin::default())
+    //.add_plugin(FrameTimeDiagnosticsPlugin::default())
     //.add_plugin(RapierDebugRenderPlugin::default())
     .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
     .add_system(window_resized_event)
@@ -151,7 +189,9 @@ fn physics_init(
 }
 
 fn physics_ser(mut ser_query: Query<&mut SerPhysics>, context: Res<RapierContext>) {
-    ser_query.single_mut().ser = bincode::serialize(context.into_inner()).unwrap();
+    let value = context.into_inner();
+    println!("{}", value.islands.active_dynamic_bodies().len());
+    ser_query.single_mut().ser = bincode::serialize(value).unwrap();
 }
 
 fn physics_deser(ser_query: Query<&SerPhysics>, mut commands: Commands) {
@@ -287,10 +327,10 @@ fn movement(
         let input = inputs[player.handle as usize].0.inp;
         let mut acc = Vec2::new(0.0, 0.0);
         if input & INPUT_UP != 0 && input & INPUT_DOWN == 0 {
-            acc.y -= 1.0;
+            acc.y += 1.0;
         }
         if input & INPUT_UP == 0 && input & INPUT_DOWN != 0 {
-            acc.x -= 1.0;
+            acc.y -= 1.0;
         }
         if input & INPUT_LEFT != 0 && input & INPUT_RIGHT == 0 {
             acc.x += 1.0;
@@ -313,8 +353,8 @@ fn shoot(
 ) {
     for (player, player_transform, _rb_vels) in player_query.iter() {
         let input = inputs[player.handle as usize].0;
-        let sx: f32 = (input.sx as f32) - 127.0 / 256.0;
-        let sy: f32 = (input.sy as f32) - 127.0 / 256.0;
+        let sx: f32 = ((input.sx as f32) - 127.0) / 256.0;
+        let sy: f32 = ((input.sy as f32) - 127.0) / 256.0;
         let mut acc = Vec2::new(sx, sy);
         if acc.length_squared() > 0.0 {
             acc /= acc.length();
@@ -352,7 +392,7 @@ fn shoot(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Map {
     name: String,
     walls: Vec<Vec<i32>>,
@@ -438,8 +478,6 @@ fn setup(
     synctest_session: Option<Res<SyncTestSession<GGRSConfig>>>,
     spectator_session: Option<Res<SpectatorSession<GGRSConfig>>>,
 ) {
-    rapier_config.gravity = Vec2::ZERO;
-
     let color = commands
         .spawn()
         .insert_bundle(SpriteBundle {

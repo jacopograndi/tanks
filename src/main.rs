@@ -120,15 +120,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_stage_after(
                     ROLLBACK_PHYSICS_2,
-                    ROLLBACK_PHYSICS_3,
-                    SystemStage::parallel().with_system_set(
-                        RapierPhysicsPlugin::<NoUserData>::get_systems(
-                            PhysicsStages::DetectDespawn,
-                        ),
-                    ),
-                )
-                .with_stage_after(
-                    ROLLBACK_PHYSICS_3,
                     ROLLBACK_TEARDOWN,
                     SystemStage::single(physics_ser),
                 ),
@@ -162,9 +153,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .insert_resource(SessionType::P2PSession)
     //.add_plugin(LogDiagnosticsPlugin::default())
     //.add_plugin(FrameTimeDiagnosticsPlugin::default())
-    //.add_plugin(RapierDebugRenderPlugin::default())
+    .add_plugin(RapierDebugRenderPlugin::default())
     .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
+    .add_stage_after(
+        CoreStage::Update,
+        "deser",
+        SystemStage::single(physics_deser),
+    )
+    .add_stage_after(
+        "deser",
+        "sync physics",
+        SystemStage::parallel().with_system_set(RapierPhysicsPlugin::<NoUserData>::get_systems(
+            PhysicsStages::Writeback,
+        )),
+    )
     .add_system(window_resized_event)
+    .add_stage_before(
+        CoreStage::Last,
+        ROLLBACK_PHYSICS_3,
+        SystemStage::parallel().with_system_set(RapierPhysicsPlugin::<NoUserData>::get_systems(
+            PhysicsStages::DetectDespawn,
+        )),
+    )
     .run();
 
     Ok(())
@@ -190,14 +200,15 @@ fn physics_init(
 
 fn physics_ser(mut ser_query: Query<&mut SerPhysics>, context: Res<RapierContext>) {
     let value = context.into_inner();
-    println!("{}", value.islands.active_dynamic_bodies().len());
-    ser_query.single_mut().ser = bincode::serialize(value).unwrap();
+    let mut ph_ser = ser_query.single_mut();
+    ph_ser.ser = bincode::serialize(&value).unwrap();
 }
 
 fn physics_deser(ser_query: Query<&SerPhysics>, mut commands: Commands) {
     commands.remove_resource::<RapierContext>();
-    commands
-        .insert_resource(bincode::deserialize::<RapierContext>(&ser_query.single().ser).unwrap());
+    commands.insert_resource(
+        bincode::deserialize::<RapierContext>(ser_query.single().ser.as_slice()).unwrap(),
+    );
 }
 
 fn window_resized_event(
@@ -333,10 +344,10 @@ fn movement(
             acc.y -= 1.0;
         }
         if input & INPUT_LEFT != 0 && input & INPUT_RIGHT == 0 {
-            acc.x += 1.0;
+            acc.x -= 1.0;
         }
         if input & INPUT_LEFT == 0 && input & INPUT_RIGHT != 0 {
-            acc.x -= 1.0;
+            acc.x += 1.0;
         }
         if acc.length_squared() > 0.0 {
             acc /= acc.length();
@@ -401,7 +412,7 @@ struct Map {
 }
 
 fn setup_map(mut commands: Commands) {
-    let file = File::open("assets/maps/TERM.txt").expect("No map file found");
+    let file = File::open("assets/maps/NAME.txt").expect("No map file found");
     let map: Map = serde_json::from_reader(BufReader::new(file)).unwrap();
 
     let minx = map.walls.iter().map(|w| w[0]).min().unwrap() as f32;
@@ -514,7 +525,7 @@ fn setup(
             .push_children(&[color])
             .insert(Player {
                 handle,
-                speed: 150.0,
+                speed: 15.00,
                 radius: 10.0,
             })
             .insert(RigidBody::Dynamic)
@@ -522,7 +533,7 @@ fn setup(
             .insert(Collider::ball(1.0))
             .insert(LockedAxes::ROTATION_LOCKED)
             .insert(Damping {
-                linear_damping: 30.0,
+                linear_damping: 300.0,
                 angular_damping: 1.0,
             })
             .insert(Friction {

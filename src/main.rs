@@ -1,5 +1,5 @@
-use std::fs::File;
 use std::io::BufReader;
+use std::{arch::global_asm, fs::File};
 
 use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
@@ -120,6 +120,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_stage_after(
                     ROLLBACK_PHYSICS_2,
+                    ROLLBACK_PHYSICS_3,
+                    SystemStage::parallel().with_system_set(
+                        RapierPhysicsPlugin::<NoUserData>::get_systems(
+                            PhysicsStages::DetectDespawn,
+                        ),
+                    ),
+                )
+                .with_stage_after(
+                    ROLLBACK_PHYSICS_3,
                     ROLLBACK_TEARDOWN,
                     SystemStage::single(physics_ser),
                 ),
@@ -154,30 +163,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //.add_plugin(LogDiagnosticsPlugin::default())
     //.add_plugin(FrameTimeDiagnosticsPlugin::default())
     .add_plugin(RapierDebugRenderPlugin::default())
-    .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
     .add_stage_after(
-        CoreStage::Update,
-        "deser",
-        SystemStage::single(physics_deser),
-    )
-    .add_stage_after(
-        "deser",
+        CoreStage::PostUpdate,
         "sync physics",
-        SystemStage::parallel().with_system_set(RapierPhysicsPlugin::<NoUserData>::get_systems(
-            PhysicsStages::Writeback,
-        )),
+        SystemStage::single(writeback_rigid_bodies),
     )
+    .add_stage_after("sync physics", "cam", SystemStage::single(camera_follow))
     .add_system(window_resized_event)
-    .add_stage_before(
-        CoreStage::Last,
-        ROLLBACK_PHYSICS_3,
-        SystemStage::parallel().with_system_set(RapierPhysicsPlugin::<NoUserData>::get_systems(
-            PhysicsStages::DetectDespawn,
-        )),
-    )
     .run();
 
     Ok(())
+}
+
+pub fn writeback_rigid_bodies(
+    mut context: ResMut<RapierContext>,
+    config: Res<RapierConfiguration>,
+    mut transforms: Query<(&mut Transform, &GlobalTransform)>,
+) {
+    let context = &mut *context;
+
+    if config.physics_pipeline_active {
+        /*
+        for (handle, rb) in context.bodies.iter() {
+            let interpolated_pos = bevy_rapier2d::utils::iso_to_transform(rb.position(), 100.0);
+            if let Some(entity) = context.rigid_body_entity(handle) {
+                if let Some((mut t, mut gt)) = transforms.get_mut(entity).ok() {
+                    let (scale, _, _) = global_transform.to_scale_rotation_translation();
+                    let transform = Transform {
+                        translation: interpolated_pos.translation,
+                        rotation: interpolated_pos.rotation,
+                        scale: scale,
+                    };
+                    *global_transform = GlobalTransform::from(transform);
+                }
+            }
+        }
+        */
+        for (handle, col) in context.colliders.iter() {
+            let interpolated_pos = bevy_rapier2d::utils::iso_to_transform(col.position(), 100.0);
+            if let Some(entity) = context.collider_entity(handle) {
+                if let Some((mut t, _gt)) = transforms.get_mut(entity).ok() {
+                    t.translation = interpolated_pos.translation;
+                    t.rotation = interpolated_pos.rotation;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default, Reflect, Component)]
@@ -425,30 +456,6 @@ fn setup_map(mut commands: Commands) {
         let upleft = Vec3::new(wall[0] as f32, wall[1] as f32, 0.0);
         let downright = Vec3::new(wall[2] as f32, wall[3] as f32, 0.0);
         let center = (upleft + downright - origin) / 2.0;
-        let size_big = Vec3::new(
-            (wall[2] - wall[0] + 3) as f32,
-            (wall[3] - wall[1] + 3) as f32,
-            1.0,
-        );
-        let movecenter = center - Vec3::new(0.0, 0.0, if wall[4] == 2 { 1.0 } else { 0.0 });
-
-        commands.spawn_bundle(SpriteBundle {
-            transform: Transform {
-                translation: movecenter,
-                scale: size_big,
-                ..default()
-            },
-            sprite: Sprite {
-                color: Color::BLACK,
-                ..default()
-            },
-            ..default()
-        });
-    }
-    for wall in &map.walls {
-        let upleft = Vec3::new(wall[0] as f32, wall[1] as f32, 0.0);
-        let downright = Vec3::new(wall[2] as f32, wall[3] as f32, 0.0);
-        let center = (upleft + downright - origin) / 2.0;
         let size = Vec3::new((wall[2] - wall[0]) as f32, (wall[3] - wall[1]) as f32, 1.0);
         let color = match wall[4] {
             1 => Color::rgba(0.7, 0.2, 0.0, 1.0),
@@ -457,6 +464,24 @@ fn setup_map(mut commands: Commands) {
             _ => Color::rgba(1.0, 0.4, 0.03, 1.0),
         };
         let movecenter = center - Vec3::new(0.0, 0.0, if wall[4] == 2 { 1.0 } else { 0.0 });
+
+        commands.spawn_bundle(SpriteBundle {
+            transform: Transform {
+                translation: movecenter,
+                scale: Vec3::new(
+                    (wall[2] - wall[0] + 3) as f32,
+                    (wall[3] - wall[1] + 3) as f32,
+                    1.0,
+                ),
+                ..default()
+            },
+            sprite: Sprite {
+                color: Color::BLACK,
+                ..default()
+            },
+            ..default()
+        });
+
         let entity = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {

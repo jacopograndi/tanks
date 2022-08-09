@@ -1971,21 +1971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inv"
-version = "0.1.1"
-dependencies = [
- "bevy",
- "bevy_ggrs",
- "bevy_rapier2d",
- "bincode",
- "bytemuck",
- "ggrs",
- "serde",
- "serde_json",
- "structopt",
-]
-
-[[package]]
 name = "io-kit-sys"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3196,6 +3181,21 @@ dependencies = [
  "hash32-derive",
  "num-traits",
  "typenum",
+]
+
+[[package]]
+name = "tanks"
+version = "0.1.1"
+dependencies = [
+ "bevy",
+ "bevy_ggrs",
+ "bevy_rapier2d",
+ "bincode",
+ "bytemuck",
+ "ggrs",
+ "serde",
+ "serde_json",
+ "structopt",
 ]
 
 [[package]]

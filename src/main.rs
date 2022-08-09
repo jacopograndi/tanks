@@ -1,9 +1,8 @@
 use std::io::BufReader;
+use std::time::Duration;
 use std::{arch::global_asm, fs::File};
 
 use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
-
-use bevy_rapier2d::{pipeline::CollisionEvent::*, prelude::*};
 
 use bevy_ggrs::{GGRSPlugin, Rollback, RollbackIdProvider, SessionType};
 use ggrs::{
@@ -25,13 +24,9 @@ impl Config for GGRSConfig {
 }
 
 const FPS: usize = 60;
-const ROLLBACK_SETUP: &str = "rollback_setup";
-const ROLLBACK_PHYSICS_0: &str = "rollback_physics_0";
-const ROLLBACK_PHYSICS_1: &str = "rollback_physics_1";
-const ROLLBACK_PHYSICS_2: &str = "rollback_physics_2";
-const ROLLBACK_PHYSICS_3: &str = "rollback_physics_3";
 const ROLLBACK_CORE: &str = "rollback_core";
-const ROLLBACK_TEARDOWN: &str = "rollback_teardown";
+const ROLLBACK_VELOCITY: &str = "rollback_velocity";
+const ROLLBACK_FUSE: &str = "rollback_fuse";
 
 // structopt will read command line parameters for u
 #[derive(StructOpt)]
@@ -81,56 +76,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     GGRSPlugin::<GGRSConfig>::new()
         .with_update_frequency(FPS)
         .with_input_system(input)
-        .register_rollback_type::<SerPhysics>()
+        .register_rollback_type::<Transform>()
+        .register_rollback_type::<Rigidbody>()
+        .register_rollback_type::<Fuse>()
         .register_rollback_type::<Player>()
         .register_rollback_type::<Bullet>()
         .with_rollback_schedule(
             Schedule::default()
-                .with_stage(ROLLBACK_SETUP, SystemStage::single(physics_deser))
-                .with_stage_after(
-                    ROLLBACK_SETUP,
+                .with_stage(
                     ROLLBACK_CORE,
                     SystemStage::parallel()
                         .with_system(movement)
-                        .with_system(shoot)
-                        .with_system(hits),
+                        .with_system(shoot),
                 )
                 .with_stage_after(
                     ROLLBACK_CORE,
-                    ROLLBACK_PHYSICS_0,
-                    SystemStage::parallel().with_system_set(
-                        RapierPhysicsPlugin::<NoUserData>::get_systems(PhysicsStages::SyncBackend),
-                    ),
+                    ROLLBACK_VELOCITY,
+                    SystemStage::single(apply_velocity),
                 )
                 .with_stage_after(
-                    ROLLBACK_PHYSICS_0,
-                    ROLLBACK_PHYSICS_1,
-                    SystemStage::parallel().with_system_set(
-                        RapierPhysicsPlugin::<NoUserData>::get_systems(
-                            PhysicsStages::StepSimulation,
-                        ),
-                    ),
-                )
-                .with_stage_after(
-                    ROLLBACK_PHYSICS_1,
-                    ROLLBACK_PHYSICS_2,
-                    SystemStage::parallel().with_system_set(
-                        RapierPhysicsPlugin::<NoUserData>::get_systems(PhysicsStages::Writeback),
-                    ),
-                )
-                .with_stage_after(
-                    ROLLBACK_PHYSICS_2,
-                    ROLLBACK_PHYSICS_3,
-                    SystemStage::parallel().with_system_set(
-                        RapierPhysicsPlugin::<NoUserData>::get_systems(
-                            PhysicsStages::DetectDespawn,
-                        ),
-                    ),
-                )
-                .with_stage_after(
-                    ROLLBACK_PHYSICS_3,
-                    ROLLBACK_TEARDOWN,
-                    SystemStage::single(physics_ser),
+                    ROLLBACK_VELOCITY,
+                    ROLLBACK_FUSE,
+                    SystemStage::single(clean_fuses),
                 ),
         )
         .build(&mut app);
@@ -141,105 +108,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     })
     .add_plugins(DefaultPlugins)
-    .insert_resource(RapierConfiguration {
-        gravity: Vec2::new(0.0, 0.0),
-        physics_pipeline_active: true,
-        query_pipeline_active: true,
-        scaled_shape_subdivision: 1,
-        timestep_mode: TimestepMode::Fixed {
-            dt: 1.0 / (FPS as f32),
-            substeps: 2,
-        },
-    })
-    .add_plugin(
-        RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0).with_default_system_setup(false),
-    )
-    .add_startup_system(physics_init)
     .add_startup_system(setup)
     .add_startup_system(spawn_camera)
     // add your GGRS session
     .insert_resource(sess)
     .insert_resource(SessionType::P2PSession)
-    //.add_plugin(LogDiagnosticsPlugin::default())
-    //.add_plugin(FrameTimeDiagnosticsPlugin::default())
-    .add_plugin(RapierDebugRenderPlugin::default())
     .add_stage_after(
         CoreStage::PostUpdate,
-        "sync physics",
-        SystemStage::single(writeback_rigid_bodies),
+        "cam",
+        SystemStage::single(camera_follow),
     )
-    .add_stage_after("sync physics", "cam", SystemStage::single(camera_follow))
     .add_system(window_resized_event)
     .run();
 
     Ok(())
-}
-
-pub fn writeback_rigid_bodies(
-    mut context: ResMut<RapierContext>,
-    config: Res<RapierConfiguration>,
-    mut transforms: Query<(&mut Transform, &GlobalTransform)>,
-) {
-    let context = &mut *context;
-
-    if config.physics_pipeline_active {
-        /*
-        for (handle, rb) in context.bodies.iter() {
-            let interpolated_pos = bevy_rapier2d::utils::iso_to_transform(rb.position(), 100.0);
-            if let Some(entity) = context.rigid_body_entity(handle) {
-                if let Some((mut t, mut gt)) = transforms.get_mut(entity).ok() {
-                    let (scale, _, _) = global_transform.to_scale_rotation_translation();
-                    let transform = Transform {
-                        translation: interpolated_pos.translation,
-                        rotation: interpolated_pos.rotation,
-                        scale: scale,
-                    };
-                    *global_transform = GlobalTransform::from(transform);
-                }
-            }
-        }
-        */
-        for (handle, col) in context.colliders.iter() {
-            let interpolated_pos = bevy_rapier2d::utils::iso_to_transform(col.position(), 100.0);
-            if let Some(entity) = context.collider_entity(handle) {
-                if let Some((mut t, _gt)) = transforms.get_mut(entity).ok() {
-                    t.translation = interpolated_pos.translation;
-                    t.rotation = interpolated_pos.rotation;
-                }
-            }
-        }
-    }
-}
-
-#[derive(Default, Reflect, Component)]
-struct SerPhysics {
-    pub ser: Vec<u8>,
-}
-
-fn physics_init(
-    mut commands: Commands,
-    context: Res<RapierContext>,
-    mut rip: ResMut<RollbackIdProvider>,
-) {
-    commands
-        .spawn()
-        .insert(SerPhysics {
-            ser: bincode::serialize(context.into_inner()).unwrap(),
-        })
-        .insert(Rollback::new(rip.next_id()));
-}
-
-fn physics_ser(mut ser_query: Query<&mut SerPhysics>, context: Res<RapierContext>) {
-    let value = context.into_inner();
-    let mut ph_ser = ser_query.single_mut();
-    ph_ser.ser = bincode::serialize(&value).unwrap();
-}
-
-fn physics_deser(ser_query: Query<&SerPhysics>, mut commands: Commands) {
-    commands.remove_resource::<RapierContext>();
-    commands.insert_resource(
-        bincode::deserialize::<RapierContext>(ser_query.single().ser.as_slice()).unwrap(),
-    );
 }
 
 fn window_resized_event(
@@ -276,38 +158,26 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn_bundle(camera);
 }
 
-fn hits(
-    mut commands: Commands,
-    mut collision_events: EventReader<CollisionEvent>,
-    bullet_query: Query<&Bullet>,
-) {
-    let mut despawned = Vec::<Entity>::new();
-    for collision_event in collision_events.iter() {
-        if let Started(ent, oth, _) = collision_event {
-            if let Ok(_) = bullet_query.get(*ent) {
-                if !despawned.contains(&*ent) {
-                    despawned.push(*ent);
-                    commands.entity(*ent).despawn();
-                }
-            }
-            if let Ok(_) = bullet_query.get(*oth) {
-                if !despawned.contains(&*oth) {
-                    despawned.push(*oth);
-                    commands.entity(*oth).despawn();
-                }
-            }
-        }
-    }
-}
-
 #[derive(Component, Default, Reflect)]
 pub struct Bullet;
+
+#[derive(Component, Default, Reflect)]
+pub struct Fuse {
+    lit: bool,
+    timeleft: f32,
+}
 
 #[derive(Component, Default, Reflect)]
 pub struct Player {
     pub handle: usize,
     pub speed: f32,
     pub radius: f32,
+}
+
+#[derive(Component, Default, Reflect)]
+pub struct Rigidbody {
+    pub vel: Vec2,
+    pub friction: f32,
 }
 
 #[repr(C)]
@@ -362,10 +232,10 @@ pub fn input(_handle: In<PlayerHandle>, keyboard_input: Res<Input<KeyCode>>) -> 
 }
 
 fn movement(
-    mut player_query: Query<(&mut Player, &mut Velocity)>,
+    mut player_query: Query<(&mut Player, &mut Rigidbody)>,
     inputs: Res<Vec<(BoxInput, InputStatus)>>,
 ) {
-    for (player, mut rb_vels) in player_query.iter_mut() {
+    for (player, mut rb) in player_query.iter_mut() {
         let input = inputs[player.handle as usize].0.inp;
         let mut acc = Vec2::new(0.0, 0.0);
         if input & INPUT_UP != 0 && input & INPUT_DOWN == 0 {
@@ -383,12 +253,12 @@ fn movement(
         if acc.length_squared() > 0.0 {
             acc /= acc.length();
         }
-        rb_vels.linvel += acc * player.speed;
+        rb.vel += acc * player.speed;
     }
 }
 
 fn shoot(
-    player_query: Query<(&Player, &Transform, &Velocity)>,
+    player_query: Query<(&Player, &Transform, &Rigidbody)>,
     inputs: Res<Vec<(BoxInput, InputStatus)>>,
     mut commands: Commands,
     mut rip: ResMut<RollbackIdProvider>,
@@ -417,19 +287,35 @@ fn shoot(
                     ..default()
                 })
                 .insert(Bullet)
-                .insert(RigidBody::Dynamic)
-                .insert(Restitution::coefficient(0.0))
-                .insert(Collider::cuboid(0.5, 0.5))
-                .insert(LockedAxes::ROTATION_LOCKED)
-                .insert(Damping {
-                    linear_damping: 0.3,
-                    angular_damping: 1.0,
+                .insert(Fuse {
+                    lit: true,
+                    timeleft: 2.0,
                 })
-                .insert(Ccd::enabled())
-                .insert(Velocity::linear(acc * 1000.0))
-                .insert(CollisionGroups::new(0b010, 0b101))
-                .insert(ActiveEvents::COLLISION_EVENTS)
+                .insert(Rigidbody {
+                    vel: acc * 10.0,
+                    friction: 0.0,
+                })
                 .insert(Rollback::new(rip.next_id()));
+        }
+    }
+}
+
+fn apply_velocity(mut query: Query<(&mut Transform, &mut Rigidbody)>) {
+    for (mut tr, mut rb) in query.iter_mut() {
+        tr.translation.x += rb.vel.x;
+        tr.translation.y += rb.vel.y;
+        let friction = rb.friction;
+        rb.vel *= 1.0 - friction;
+    }
+}
+
+fn clean_fuses(mut commands: Commands, mut fuse_query: Query<(Entity, &mut Fuse)>) {
+    for (entity, mut fuse) in &mut fuse_query {
+        if fuse.lit {
+            fuse.timeleft -= 1.0 / (FPS as f32);
+            if fuse.timeleft <= 0.0 {
+                commands.entity(entity).despawn();
+            }
         }
     }
 }
@@ -492,8 +378,8 @@ fn setup_map(mut commands: Commands) {
                 sprite: Sprite { color, ..default() },
                 ..default()
             })
-            .insert(Collider::cuboid(0.5, 0.5))
             .id();
+        /*
         if wall[4] == 1 {
             commands
                 .entity(entity)
@@ -503,12 +389,12 @@ fn setup_map(mut commands: Commands) {
                 .entity(entity)
                 .insert(CollisionGroups::new(0b100, 0b101));
         }
+        */
     }
 }
 
 fn setup(
     mut commands: Commands,
-    mut rapier_config: ResMut<RapierConfiguration>,
     mut rip: ResMut<RollbackIdProvider>,
     p2p_session: Option<Res<P2PSession<GGRSConfig>>>,
     synctest_session: Option<Res<SyncTestSession<GGRSConfig>>>,
@@ -537,7 +423,7 @@ fn setup(
             .spawn()
             .insert_bundle(SpriteBundle {
                 transform: Transform {
-                    translation: Vec3::new(handle as f32, 0.0, 0.0),
+                    translation: Vec3::new((handle as f32) * 20.0, 0.0, 0.0),
                     scale: Vec3::splat(10.0),
                     ..default()
                 },
@@ -550,24 +436,13 @@ fn setup(
             .push_children(&[color])
             .insert(Player {
                 handle,
-                speed: 15.00,
+                speed: 1.0,
                 radius: 10.0,
             })
-            .insert(RigidBody::Dynamic)
-            .insert(Restitution::coefficient(0.0))
-            .insert(Collider::ball(1.0))
-            .insert(LockedAxes::ROTATION_LOCKED)
-            .insert(Damping {
-                linear_damping: 300.0,
-                angular_damping: 1.0,
+            .insert(Rigidbody {
+                vel: Vec2::new(0.0, 0.0),
+                friction: 0.2,
             })
-            .insert(Friction {
-                coefficient: 0.0,
-                combine_rule: CoefficientCombineRule::Min,
-            })
-            .insert(Ccd::enabled())
-            .insert(Velocity::zero())
-            .insert(CollisionGroups::new(0b001, 0b111))
             .insert(Rollback::new(rip.next_id()));
     }
 

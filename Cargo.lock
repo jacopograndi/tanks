@@ -416,13 +416,14 @@ dependencies = [
 [[package]]
 name = "bevy_ggrs"
 version = "0.9.0"
-source = "git+https://github.com/paxsethorld/bevy_ggrs?rev=bc78d31#bc78d316072f4ca86ed77eff3adcf0a5d4e64d86"
+source = "git+https://github.com/thwischm/bevy_ggrs?rev=3495dc6#3495dc6be84b0b568719ef1f79b20508f61fa47e"
 dependencies = [
  "bevy",
  "bytemuck",
  "ggrs",
  "instant",
  "log",
+ "parking_lot 0.12.1",
 ]
 
 [[package]]

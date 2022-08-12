@@ -1,7 +1,7 @@
+use std::fs::File;
 use std::io::BufReader;
-use std::time::Duration;
-use std::{arch::global_asm, fs::File};
 
+use bevy::sprite::MaterialMesh2dBundle;
 use bevy::{prelude::*, render::camera::ScalingMode, window::WindowResized};
 
 use bevy_ggrs::{GGRSPlugin, Rollback, RollbackIdProvider, SessionType};
@@ -25,7 +25,8 @@ impl Config for GGRSConfig {
 
 const FPS: usize = 60;
 const ROLLBACK_CORE: &str = "rollback_core";
-const ROLLBACK_VELOCITY: &str = "rollback_velocity";
+const ROLLBACK_MOVE_PLAYERS: &str = "rollback_move_players";
+const ROLLBACK_MOVE_BULLETS: &str = "rollback_move_bullets";
 const ROLLBACK_FUSE: &str = "rollback_fuse";
 
 // structopt will read command line parameters for u
@@ -91,11 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_stage_after(
                     ROLLBACK_CORE,
-                    ROLLBACK_VELOCITY,
-                    SystemStage::single(apply_velocity),
+                    ROLLBACK_MOVE_PLAYERS,
+                    SystemStage::single(move_players),
                 )
                 .with_stage_after(
-                    ROLLBACK_VELOCITY,
+                    ROLLBACK_MOVE_PLAYERS,
+                    ROLLBACK_MOVE_BULLETS,
+                    SystemStage::single(move_bullets),
+                )
+                .with_stage_after(
+                    ROLLBACK_MOVE_BULLETS,
                     ROLLBACK_FUSE,
                     SystemStage::single(clean_fuses),
                 ),
@@ -113,11 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // add your GGRS session
     .insert_resource(sess)
     .insert_resource(SessionType::P2PSession)
-    .add_stage_after(
-        CoreStage::PostUpdate,
-        "cam",
-        SystemStage::single(camera_follow),
-    )
+    .add_system_to_stage(CoreStage::PostUpdate, camera_follow)
     .add_system(window_resized_event)
     .run();
 
@@ -141,13 +143,11 @@ fn camera_follow(
 ) {
     let handles = p2p_session.unwrap().local_player_handles();
     if handles.len() > 0 {
-        let (_, transform) = player_query
-            .iter()
-            .find(|(p, _)| p.handle == handles[0])
-            .unwrap();
-        let mut camera_transform = camera_query.single_mut();
-        camera_transform.translation.x = transform.translation.x;
-        camera_transform.translation.y = transform.translation.y;
+        if let Some((_, transform)) = player_query.iter().find(|(p, _)| p.handle == handles[0]) {
+            let mut camera_transform = camera_query.single_mut();
+            camera_transform.translation.x = transform.translation.x;
+            camera_transform.translation.y = transform.translation.y;
+        };
     }
 }
 
@@ -160,6 +160,9 @@ fn spawn_camera(mut commands: Commands) {
 
 #[derive(Component, Default, Reflect)]
 pub struct Bullet;
+
+#[derive(Component)]
+pub struct Wall;
 
 #[derive(Component, Default, Reflect)]
 pub struct Fuse {
@@ -269,9 +272,10 @@ fn shoot(
         let sy: f32 = ((input.sy as f32) - 127.0) / 256.0;
         let mut acc = Vec2::new(sx, sy);
         if acc.length_squared() > 0.0 {
+            // TODO: don't shoot when inside wall
             acc /= acc.length();
-            let head = Vec3::new(acc.x, acc.y, 0.0) * (2.0 + player.radius + 3.0);
-            let angle = Vec2::angle_between(Vec2::new(1.0, 0.0), acc);
+            let head = Vec3::new(acc.x, acc.y, 0.0) * (2.0 + player.radius);
+            let angle = Vec2::angle_between(-Vec2::X, acc);
             commands
                 .spawn()
                 .insert_bundle(SpriteBundle {
@@ -300,10 +304,203 @@ fn shoot(
     }
 }
 
-fn apply_velocity(mut query: Query<(&mut Transform, &mut Rigidbody)>) {
-    for (mut tr, mut rb) in query.iter_mut() {
-        tr.translation.x += rb.vel.x;
-        tr.translation.y += rb.vel.y;
+// https://stackoverflow.com/questions/3838329
+fn ccw(a: Vec3, b: Vec3, c: Vec3) -> bool {
+    (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x)
+}
+
+fn intersect_segment_segment(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> bool {
+    ccw(a, c, d) != ccw(b, c, d) && ccw(a, b, c) != ccw(a, b, d)
+}
+
+// https://stackoverflow.com/questions/1073336
+fn intersect_segment_circle(e: Vec3, l: Vec3, c: Vec3, r: f32) -> bool {
+    if (e + l - c).length_squared() < r * r {
+        return true;
+    }
+    if (e - c).length_squared() < r * r {
+        return true;
+    }
+
+    let d = l;
+    let f = e - c;
+    let a = d.length_squared();
+    let b = 2.0 * f.dot(d);
+    let z = f.dot(f) - r * r;
+    let delta = b * b - 4.0 * a * z;
+    if delta > 0.0 {
+        let deltaroot = delta.sqrt();
+        let t1 = (-b - deltaroot) / (2.0 * a);
+        if t1 >= 0.0 && t1 <= 1.0 {
+            return true;
+        }
+        let t2 = (-b + deltaroot) / (2.0 * a);
+        if t2 >= 0.0 && t2 <= 1.0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn collision_player_circle(pos: Vec3, vel: Vec3, center: Vec3, rad: f32) -> (Vec3, Vec3) {
+    if intersect_segment_circle(pos, vel, center, rad) {
+        let out = pos + vel - center;
+        let norm = out.normalize();
+        let perp = Vec3::new(-out.y, out.x, 0.0).dot(out) * 2.0;
+        return (norm * rad * 1.0005 + center, out * perp);
+    }
+    (pos, vel)
+}
+
+fn collision_player_wall(
+    pos: Vec3,
+    vel: Vec3,
+    rad: f32,
+    tl: Vec3,
+    br: Vec3,
+) -> (bool, (Vec3, Vec3)) {
+    let tr = Vec3::new(br.x, tl.y, 0.0);
+    let bl = Vec3::new(tl.x, br.y, 0.0);
+    let (l, r, b, t) = (tl.x, br.x, br.y, tl.y);
+
+    if r < pos.x && pos.x < l && pos.y - rad < b {
+        if pos.y + rad + vel.y > b {
+            return (
+                true,
+                (
+                    Vec3::new(pos.x, b - rad, 0.0),
+                    Vec3::new(vel.x, vel.y * -0.1, 0.0),
+                ),
+            );
+        }
+    }
+    if r < pos.x && pos.x < l && pos.y + rad > t {
+        if pos.y - rad + vel.y < t {
+            return (
+                true,
+                (
+                    Vec3::new(pos.x, t + rad, 0.0),
+                    Vec3::new(vel.x, vel.y * -0.1, 0.0),
+                ),
+            );
+        }
+    }
+    if b < pos.y && pos.y < t && pos.x + rad > l {
+        if pos.x - rad + vel.x < l {
+            return (
+                true,
+                (
+                    Vec3::new(l + rad, pos.y, 0.0),
+                    Vec3::new(vel.x * -0.1, vel.y, 0.0),
+                ),
+            );
+        }
+    }
+    if b < pos.y && pos.y < t && pos.x - rad < r {
+        if pos.x + rad + vel.x > r {
+            return (
+                true,
+                (
+                    Vec3::new(r - rad, pos.y, 0.0),
+                    Vec3::new(vel.x * -0.1, vel.y, 0.0),
+                ),
+            );
+        }
+    }
+
+    if pos.x < r && pos.y < b {
+        if rad * rad > (br - pos - vel).length_squared() {
+            return (true, collision_player_circle(pos, vel, br, rad));
+        }
+    }
+    if pos.x > l && pos.y < b {
+        if rad * rad > (bl - pos - vel).length_squared() {
+            return (true, collision_player_circle(pos, vel, bl, rad));
+        }
+    }
+    if pos.x < r && pos.y > t {
+        if rad * rad > (tr - pos - vel).length_squared() {
+            return (true, collision_player_circle(pos, vel, tr, rad));
+        }
+    }
+    if pos.x > l && pos.y > t {
+        if rad * rad > (tl - pos - vel).length_squared() {
+            return (true, collision_player_circle(pos, vel, tl, rad));
+        }
+    }
+    (false, (pos, vel))
+}
+
+fn move_players(
+    mut player_query: Query<
+        (&mut Transform, &Player, &mut Rigidbody),
+        (With<Player>, Without<Wall>),
+    >,
+    wall_query: Query<&Transform, (With<Wall>, Without<Player>)>,
+) {
+    for (mut player_tr, player, mut rb) in player_query.iter_mut() {
+        for wall_tr in &wall_query {
+            let center = wall_tr.translation;
+            let halfsize = wall_tr.scale * 0.5;
+            let bottomright = center + Vec3::new(-halfsize.x, -halfsize.y, 0.0);
+            let topleft = center + Vec3::new(halfsize.x, halfsize.y, 0.0);
+            let (_has_collided, (pos, vel)) = collision_player_wall(
+                player_tr.translation,
+                Vec3::new(rb.vel.x, rb.vel.y, 0.0),
+                player.radius,
+                topleft,
+                bottomright,
+            );
+            player_tr.translation = pos;
+            rb.vel = Vec2::new(vel.x, vel.y);
+        }
+        player_tr.translation.x += rb.vel.x;
+        player_tr.translation.y += rb.vel.y;
+        let friction = rb.friction;
+        rb.vel *= 1.0 - friction;
+    }
+}
+
+fn move_bullets(
+    mut bullet_query: Query<
+        (&mut Transform, &mut Rigidbody, &mut Fuse),
+        (With<Bullet>, Without<Player>, Without<Wall>),
+    >,
+    player_query: Query<(&Transform, &Player), (With<Player>, Without<Bullet>, Without<Wall>)>,
+    wall_query: Query<&Transform, (With<Wall>, Without<Bullet>, Without<Player>)>,
+) {
+    for (mut bullet_tr, mut rb, mut fuse) in &mut bullet_query {
+        for (player_tr, player) in &player_query {
+            if intersect_segment_circle(
+                bullet_tr.translation,
+                Vec3::new(rb.vel.x, rb.vel.y, 0.0),
+                player_tr.translation,
+                player.radius,
+            ) {
+                fuse.timeleft = 0.0;
+                fuse.lit = true;
+            }
+        }
+        for wall_tr in &wall_query {
+            let hi = bullet_tr.translation;
+            let lo = bullet_tr.translation + Vec3::new(rb.vel.x, rb.vel.y, 0.0);
+            let center = wall_tr.translation;
+            let halfsize = wall_tr.scale * 0.5;
+            let bottomleft = center + Vec3::new(halfsize.x, -halfsize.y, 0.0);
+            let bottomright = center + Vec3::new(-halfsize.x, -halfsize.y, 0.0);
+            let topright = center + Vec3::new(-halfsize.x, halfsize.y, 0.0);
+            let topleft = center + Vec3::new(halfsize.x, halfsize.y, 0.0);
+            if intersect_segment_segment(hi, lo, bottomleft, bottomright)
+                || intersect_segment_segment(hi, lo, bottomright, topright)
+                || intersect_segment_segment(hi, lo, topright, topleft)
+                || intersect_segment_segment(hi, lo, topleft, bottomleft)
+            {
+                fuse.timeleft = 0.0;
+                fuse.lit = true;
+            }
+        }
+        bullet_tr.translation.x += rb.vel.x;
+        bullet_tr.translation.y += rb.vel.y;
         let friction = rb.friction;
         rb.vel *= 1.0 - friction;
     }
@@ -378,6 +575,7 @@ fn setup_map(mut commands: Commands) {
                 sprite: Sprite { color, ..default() },
                 ..default()
             })
+            .insert(Wall)
             .id();
         /*
         if wall[4] == 1 {
@@ -399,19 +597,9 @@ fn setup(
     p2p_session: Option<Res<P2PSession<GGRSConfig>>>,
     synctest_session: Option<Res<SyncTestSession<GGRSConfig>>>,
     spectator_session: Option<Res<SpectatorSession<GGRSConfig>>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let color = commands
-        .spawn()
-        .insert_bundle(SpriteBundle {
-            transform: Transform::default().with_scale(Vec3::splat(1.2)),
-            sprite: Sprite {
-                color: Color::BLACK,
-                ..default()
-            },
-            ..default()
-        })
-        .id();
-
     let num_players = p2p_session
         .map(|s| s.num_players())
         .or_else(|| synctest_session.map(|s| s.num_players()))
@@ -420,20 +608,16 @@ fn setup(
 
     for handle in 0..num_players {
         commands
-            .spawn()
-            .insert_bundle(SpriteBundle {
+            .spawn_bundle(MaterialMesh2dBundle {
+                mesh: meshes.add(Mesh::from(shape::Circle::new(10.0))).into(),
                 transform: Transform {
                     translation: Vec3::new((handle as f32) * 20.0, 0.0, 0.0),
-                    scale: Vec3::splat(10.0),
+                    scale: Vec3::splat(1.0),
                     ..default()
                 },
-                sprite: Sprite {
-                    color: Color::WHITE,
-                    ..default()
-                },
+                material: materials.add(ColorMaterial::from(Color::WHITE)).into(),
                 ..default()
             })
-            .push_children(&[color])
             .insert(Player {
                 handle,
                 speed: 1.0,

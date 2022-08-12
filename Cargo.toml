@@ -11,7 +11,7 @@ bevy_rapier2d = { version = "0.16.0", features = ["enhanced-determinism", "serde
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-bevy_ggrs = { git = "https://github.com/paxsethorld/bevy_ggrs", rev = "bc78d31" }
+bevy_ggrs = { git = "https://github.com/thwischm/bevy_ggrs", rev = "3495dc6" }
 ggrs = { git = "https://github.com/gschup/ggrs", features = ["sync-send"] }
 bytemuck = "1.11.0"
 structopt = "0.3.26"
